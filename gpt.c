@@ -648,7 +648,17 @@ static int gpt_print_table_from_partition(struct qdl_device *qdl,
 	}
 
 	if (memcmp(gpt.signature, "EFI PART", 8)) {
-		ux_err("partition %d has no GPT header\n", phys_partition);
+		/*
+		 * Only physical partition 0 is expected to carry a GPT on
+		 * eMMC (the user area).  The additional physical partitions
+		 * (eMMC boot/RPMB/GPP, or unused UFS LUNs) legitimately have
+		 * no GPT, so treat their absence as a normal skip rather than
+		 * an error to keep the output clean.
+		 */
+		if (phys_partition == 0)
+			ux_err("partition %d has no GPT header\n", phys_partition);
+		else
+			ux_debug("partition %d has no GPT header\n", phys_partition);
 		return 0;
 	}
 
