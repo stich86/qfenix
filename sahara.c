@@ -60,7 +60,7 @@
 
 #define DEBUG_BLOCK_SIZE (512u * 1024u)
 
-#define SAHARA_CMD_TIMEOUT_MS	1000
+#define SAHARA_CMD_TIMEOUT_MS	5000
 
 struct sahara_pkt {
 	uint32_t cmd;
