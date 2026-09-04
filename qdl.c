@@ -786,6 +786,8 @@ static void print_usage(FILE *out)
 	fprintf(out, "  read          Read partition(s) by label\n");
 	fprintf(out, "  readall       Dump all partitions to files\n");
 	fprintf(out, "  write         Erase + write a raw image to a partition\n");
+	fprintf(out, "  readsector    Read a raw range of sectors (LBA) to a file\n");
+	fprintf(out, "  writesector   Write a raw file to a range of sectors (LBA)\n");
 	fprintf(out, "  erase         Erase partition(s) by label or raw sectors\n");
 	fprintf(out, "  eraseall      Erase all partitions on device\n");
 
@@ -4793,6 +4795,326 @@ static int qdl_write_partition(int argc, char **argv)
 	return !!ret;
 }
 
+static void print_readsector_help(FILE *out)
+{
+	extern const char *__progname;
+
+	fprintf(out, "Usage: %s readsector -a START -n COUNT [-L dir | <programmer>] [options]\n", __progname);
+	fprintf(out, "\nRead a raw range of sectors (LBA) to a file, bypassing the GPT.\n");
+	fprintf(out, "Works on eMMC/UFS/NVMe (LBA); on NAND add --pages-per-block.\n");
+	fprintf(out, "\nOptions:\n");
+	fprintf(out, "  -a, --start-sector=N    First sector/LBA to read (required)\n");
+	fprintf(out, "  -n, --num-sectors=N     Number of sectors to read (required)\n");
+	fprintf(out, "  -p, --partition=N       Physical partition/LUN number (default: 0)\n");
+	fprintf(out, "  -o, --output=FILE       Output file (default: sector_<part>_<start>_<count>.bin)\n");
+	fprintf(out, "      --sector-size=N     Sector size in bytes (default: auto-detected)\n");
+	fprintf(out, "      --pages-per-block=N NAND pages per block (NAND only)\n");
+	fprintf(out, "  -s, --storage=T         Storage type: emmc|nand|ufs (default: nand)\n");
+	fprintf(out, "  -S, --serial=S          Target by serial number or COM port\n");
+	fprintf(out, "  -L, --find-loader=DIR   Find programmer in directory\n");
+	fprintf(out, "  -P, --pcie              Use PCIe/MHI transport\n");
+	fprintf(out, "  -d, --debug             Print detailed debug info\n");
+	fprintf(out, "  -h, --help              Print this help\n");
+	fprintf(out, "\nExamples:\n");
+	fprintf(out, "  %s readsector -a 0 -n 34 -o gpt_head.bin\n", __progname);
+	fprintf(out, "  %s readsector -a 1 -n 1 -s emmc -o sector1.bin\n", __progname);
+}
+
+static int qdl_readsector(int argc, char **argv)
+{
+	enum qdl_storage_type storage_type = QDL_STORAGE_NAND;
+	struct qdl_device *qdl = NULL;
+	const char *output = NULL;
+	char *loader_dir = NULL;
+	char *programmer = NULL;
+	bool storage_set = false;
+	bool use_pcie = false;
+	char *serial = NULL;
+	unsigned int partition = 0;
+	unsigned int start_sector = 0;
+	unsigned int num_sectors = 0;
+	unsigned int sector_size = 0;
+	unsigned int pages_per_block = 0;
+	bool start_set = false;
+	bool count_set = false;
+	char auto_path[4096];
+	int opt;
+	int ret;
+
+	enum { OPT_SECTOR_SIZE = 1, OPT_PAGES_PER_BLOCK };
+
+	static struct option options[] = {
+		{"debug", no_argument, 0, 'd'},
+		{"version", no_argument, 0, 'v'},
+		{"serial", required_argument, 0, 'S'},
+		{"storage", required_argument, 0, 's'},
+		{"find-loader", required_argument, 0, 'L'},
+		{"pcie", no_argument, 0, 'P'},
+		{"partition", required_argument, 0, 'p'},
+		{"start-sector", required_argument, 0, 'a'},
+		{"num-sectors", required_argument, 0, 'n'},
+		{"output", required_argument, 0, 'o'},
+		{"sector-size", required_argument, 0, OPT_SECTOR_SIZE},
+		{"pages-per-block", required_argument, 0, OPT_PAGES_PER_BLOCK},
+		{"help", no_argument, 0, 'h'},
+		{0, 0, 0, 0}
+	};
+
+	while ((opt = getopt_long(argc, argv, "dvS:s:L:Pp:a:n:o:h", options,
+				  NULL)) != -1) {
+		switch (opt) {
+		case 'd':
+			qdl_debug = true;
+			break;
+		case 'v':
+			print_version();
+			return 0;
+		case 'S':
+			serial = optarg;
+			break;
+		case 's':
+			storage_type = decode_storage(optarg);
+			storage_set = true;
+			break;
+		case 'L':
+			loader_dir = optarg;
+			break;
+		case 'P':
+			use_pcie = true;
+			break;
+		case 'p':
+			partition = strtoul(optarg, NULL, 0);
+			break;
+		case 'a':
+			start_sector = strtoul(optarg, NULL, 0);
+			start_set = true;
+			break;
+		case 'n':
+			num_sectors = strtoul(optarg, NULL, 0);
+			count_set = true;
+			break;
+		case 'o':
+			output = optarg;
+			break;
+		case OPT_SECTOR_SIZE:
+			sector_size = strtoul(optarg, NULL, 0);
+			break;
+		case OPT_PAGES_PER_BLOCK:
+			pages_per_block = strtoul(optarg, NULL, 0);
+			break;
+		case 'h':
+			print_readsector_help(stdout);
+			return 0;
+		default:
+			print_readsector_help(stderr);
+			return 1;
+		}
+	}
+
+	if (!start_set || !count_set || !num_sectors) {
+		fprintf(stderr, "Error: --start-sector and --num-sectors are required\n");
+		print_readsector_help(stderr);
+		return 1;
+	}
+
+	if (!loader_dir && optind >= argc)
+		loader_dir = ".";
+
+	if (loader_dir) {
+		programmer = find_programmer_recursive(loader_dir);
+		if (!programmer) {
+			fprintf(stderr, "Error: no programmer found in %s\n",
+				loader_dir);
+			return 1;
+		}
+		if (!storage_set)
+			storage_type = detect_storage_from_directory(loader_dir);
+	}
+
+	if (!output) {
+		snprintf(auto_path, sizeof(auto_path),
+			 "sector_%u_%u_%u.bin", partition, start_sector,
+			 num_sectors);
+		output = auto_path;
+	}
+
+	ret = firehose_session_open(&qdl,
+				    programmer ? programmer : argv[optind],
+				    storage_type, serial, use_pcie);
+	if (ret) {
+		free(programmer);
+		return 1;
+	}
+
+	ux_info("reading %u sectors from sector %u (partition %u) to %s\n",
+		num_sectors, start_sector, partition, output);
+	ret = firehose_read_to_file(qdl, partition, start_sector, num_sectors,
+				    sector_size, pages_per_block, output);
+
+	firehose_session_close(qdl, true);
+	free(programmer);
+	return !!ret;
+}
+
+static void print_writesector_help(FILE *out)
+{
+	extern const char *__progname;
+
+	fprintf(out, "Usage: %s writesector <file> -a START [-L dir | <programmer>] [options]\n", __progname);
+	fprintf(out, "\nWrite a raw file to a range of sectors (LBA), bypassing the GPT.\n");
+	fprintf(out, "Works on eMMC/UFS/NVMe (LBA); on NAND add --pages-per-block.\n");
+	fprintf(out, "\nArguments:\n");
+	fprintf(out, "  <file>                  Raw image file to write\n");
+	fprintf(out, "\nOptions:\n");
+	fprintf(out, "  -a, --start-sector=N    First sector/LBA to write to (required)\n");
+	fprintf(out, "  -n, --num-sectors=N     Max sectors to write (default: full file size)\n");
+	fprintf(out, "  -p, --partition=N       Physical partition/LUN number (default: 0)\n");
+	fprintf(out, "      --sector-size=N     Sector size in bytes (default: auto-detected)\n");
+	fprintf(out, "      --pages-per-block=N NAND pages per block (NAND only)\n");
+	fprintf(out, "  -s, --storage=T         Storage type: emmc|nand|ufs (default: nand)\n");
+	fprintf(out, "  -S, --serial=S          Target by serial number or COM port\n");
+	fprintf(out, "  -L, --find-loader=DIR   Find programmer in directory\n");
+	fprintf(out, "  -P, --pcie              Use PCIe/MHI transport\n");
+	fprintf(out, "  -d, --debug             Print detailed debug info\n");
+	fprintf(out, "  -h, --help              Print this help\n");
+	fprintf(out, "\nExamples:\n");
+	fprintf(out, "  %s writesector gpt_head.bin -a 0\n", __progname);
+	fprintf(out, "  %s writesector patch.bin -a 1024 -p 0 -s emmc\n", __progname);
+}
+
+static int qdl_writesector(int argc, char **argv)
+{
+	enum qdl_storage_type storage_type = QDL_STORAGE_NAND;
+	struct qdl_device *qdl = NULL;
+	char *loader_dir = NULL;
+	char *programmer = NULL;
+	bool storage_set = false;
+	bool use_pcie = false;
+	char *serial = NULL;
+	const char *filename;
+	unsigned int partition = 0;
+	unsigned int start_sector = 0;
+	unsigned int num_sectors = 0;
+	unsigned int sector_size = 0;
+	unsigned int pages_per_block = 0;
+	bool start_set = false;
+	int opt;
+	int ret;
+
+	enum { OPT_SECTOR_SIZE = 1, OPT_PAGES_PER_BLOCK };
+
+	static struct option options[] = {
+		{"debug", no_argument, 0, 'd'},
+		{"version", no_argument, 0, 'v'},
+		{"serial", required_argument, 0, 'S'},
+		{"storage", required_argument, 0, 's'},
+		{"find-loader", required_argument, 0, 'L'},
+		{"pcie", no_argument, 0, 'P'},
+		{"partition", required_argument, 0, 'p'},
+		{"start-sector", required_argument, 0, 'a'},
+		{"num-sectors", required_argument, 0, 'n'},
+		{"sector-size", required_argument, 0, OPT_SECTOR_SIZE},
+		{"pages-per-block", required_argument, 0, OPT_PAGES_PER_BLOCK},
+		{"help", no_argument, 0, 'h'},
+		{0, 0, 0, 0}
+	};
+
+	while ((opt = getopt_long(argc, argv, "dvS:s:L:Pp:a:n:h", options,
+				  NULL)) != -1) {
+		switch (opt) {
+		case 'd':
+			qdl_debug = true;
+			break;
+		case 'v':
+			print_version();
+			return 0;
+		case 'S':
+			serial = optarg;
+			break;
+		case 's':
+			storage_type = decode_storage(optarg);
+			storage_set = true;
+			break;
+		case 'L':
+			loader_dir = optarg;
+			break;
+		case 'P':
+			use_pcie = true;
+			break;
+		case 'p':
+			partition = strtoul(optarg, NULL, 0);
+			break;
+		case 'a':
+			start_sector = strtoul(optarg, NULL, 0);
+			start_set = true;
+			break;
+		case 'n':
+			num_sectors = strtoul(optarg, NULL, 0);
+			break;
+		case OPT_SECTOR_SIZE:
+			sector_size = strtoul(optarg, NULL, 0);
+			break;
+		case OPT_PAGES_PER_BLOCK:
+			pages_per_block = strtoul(optarg, NULL, 0);
+			break;
+		case 'h':
+			print_writesector_help(stdout);
+			return 0;
+		default:
+			print_writesector_help(stderr);
+			return 1;
+		}
+	}
+
+	if (optind >= argc) {
+		fprintf(stderr, "Error: input file is required\n");
+		print_writesector_help(stderr);
+		return 1;
+	}
+	filename = argv[optind];
+
+	if (!start_set) {
+		fprintf(stderr, "Error: --start-sector is required\n");
+		print_writesector_help(stderr);
+		return 1;
+	}
+
+	/* Positional args: <file> [programmer].  Without -L and no programmer
+	 * arg, default to the current directory.
+	 */
+	if (!loader_dir && argc - optind < 2)
+		loader_dir = ".";
+
+	if (loader_dir) {
+		programmer = find_programmer_recursive(loader_dir);
+		if (!programmer) {
+			fprintf(stderr, "Error: no programmer found in %s\n",
+				loader_dir);
+			return 1;
+		}
+		if (!storage_set)
+			storage_type = detect_storage_from_directory(loader_dir);
+	}
+
+	ret = firehose_session_open(&qdl,
+				    programmer ? programmer : argv[optind + 1],
+				    storage_type, serial, use_pcie);
+	if (ret) {
+		free(programmer);
+		return 1;
+	}
+
+	ux_info("writing %s to sector %u (partition %u)\n",
+		filename, start_sector, partition);
+	ret = firehose_program_file(qdl, partition, start_sector, num_sectors,
+				    sector_size, pages_per_block,
+				    filename, filename);
+
+	firehose_session_close(qdl, true);
+	free(programmer);
+	return !!ret;
+}
+
 static void print_eraseall_help(FILE *out)
 {
 	extern const char *__progname;
@@ -5721,6 +6043,10 @@ int main(int argc, char **argv)
 		ret = qdl_erase(argc - 1, argv + 1);
 	} else if (!strcmp(argv[1], "write")) {
 		ret = qdl_write_partition(argc - 1, argv + 1);
+	} else if (!strcmp(argv[1], "readsector")) {
+		ret = qdl_readsector(argc - 1, argv + 1);
+	} else if (!strcmp(argv[1], "writesector")) {
+		ret = qdl_writesector(argc - 1, argv + 1);
 	} else if (!strcmp(argv[1], "eraseall")) {
 		ret = qdl_eraseall(argc - 1, argv + 1);
 	} else if (!strcmp(argv[1], "nvread")) {
