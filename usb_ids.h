@@ -113,7 +113,6 @@ static const struct diag_iface_map diag_iface_maps[] = {
 	/* Dell/Foxconn 5G */
 	{ 0x413c, 0x81d7, 5 },	/* DW5820e / Telit LN940/T77W968 */
 	{ 0x413c, 0x81e0, 0 },	/* DW5930e / Foxconn T99W175 */
-{ 0x413c, 0x81e0, 0 },	/* DW5930e / Foxconn T99W175 */
 	{ 0x413c, 0x81e4, 0 },	/* DW5931e / Foxconn T99W373 */
 	/* Telit 4G */
 	{ 0x1bc7, 0x1040, 0 },	/* Telit LM960A18 QMI */
