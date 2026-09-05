@@ -546,6 +546,43 @@ static int firehose_try_configure(struct qdl_device *qdl, bool skip_storage_init
 	return 0;
 }
 
+/*
+ * Probe whether a Firehose programmer is already running on the device.
+ *
+ * Sends a single <nop> and waits briefly for a response.  Returns true if
+ * the loader answered (ACK) — i.e. the device is already in Firehose mode
+ * and the Sahara programmer upload can be skipped (e.g. after a previous
+ * run that used --no-reset).  Returns false on timeout / no valid response,
+ * in which case the caller should fall back to the normal Sahara handshake.
+ *
+ * The short timeout keeps the fresh-EDL path fast; sending a nop to a device
+ * still in PBL/Sahara mode is harmless (the PBL ignores non-Sahara bytes).
+ */
+int firehose_probe(struct qdl_device *qdl)
+{
+	xmlNode *root;
+	xmlNode *node;
+	xmlDoc *doc;
+	int ret;
+
+	if (qdl->dev_type == QDL_DEVICE_SIM)
+		return 0;
+
+	doc = xmlNewDoc((xmlChar *)"1.0");
+	root = xmlNewNode(NULL, (xmlChar *)"data");
+	xmlDocSetRootElement(doc, root);
+	node = xmlNewChild(root, NULL, (xmlChar *)"nop", NULL);
+	xml_setpropf(node, "value", "ping");
+
+	ret = firehose_write(qdl, doc);
+	xmlFreeDoc(doc);
+	if (ret < 0)
+		return 0;
+
+	ret = firehose_read(qdl, 2000, firehose_generic_parser, NULL);
+	return ret == FIREHOSE_ACK;
+}
+
 static int firehose_erase(struct qdl_device *qdl, struct program *program)
 {
 	unsigned int sector_size;

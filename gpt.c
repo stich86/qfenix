@@ -66,7 +66,7 @@ struct smem_flash_ptable {
  * Try to detect NAND page size by reading sector 0 with different sizes.
  * Returns the working sector size, or 0 on failure.
  */
-static size_t nand_detect_sector_size(struct qdl_device *qdl)
+size_t nand_detect_sector_size(struct qdl_device *qdl)
 {
 	static const size_t sizes[] = { 4096, 2048 };
 	uint8_t buf[4096];
