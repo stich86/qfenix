@@ -58,8 +58,8 @@ enum {
 bool qdl_debug;
 FILE *qdl_log_file;
 
-/* Global: skip the device reset normally issued at the end of an operation. */
-static bool qfenix_no_reset;
+/* Global: reset the device at the end of an operation (opt-in via --reset). */
+static bool qfenix_reset;
 
 static int sahara_run_with_retry(struct qdl_device *qdl,
 				 const struct sahara_image *images,
@@ -857,7 +857,7 @@ static void print_usage(FILE *out)
 	fprintf(out, " (work with all subcommands):\n");
 	fprintf(out, "      --log=FILE            Write debug-level log to FILE\n");
 	fprintf(out, "      --sahara-timeout=MS   Sahara command timeout in ms (default: 1000)\n");
-	fprintf(out, "      --no-reset            Don't reset the device after the operation\n");
+	fprintf(out, "      --reset               Reset the device after the operation (default: no reset)\n");
 
 	ux_fputs_color(out, UX_COLOR_BOLD UX_COLOR_GREEN,
 		       "\nFlash Options");
@@ -2176,9 +2176,9 @@ static int firehose_session_open(struct qdl_device **qdl_out, char *programmer,
 		qdl->storage_type = storage;
 
 		/*
-		 * If a programmer is already running (e.g. a previous run used
-		 * --no-reset), skip the Sahara upload and talk Firehose
-		 * directly.
+		 * If a programmer is already running (the device was left in
+		 * Firehose by a previous run that didn't reset it), skip the
+		 * Sahara upload and talk Firehose directly.
 		 */
 		if (firehose_probe(qdl)) {
 			ux_info("programmer already running, skipping loader upload\n");
@@ -2209,7 +2209,7 @@ static int firehose_session_open(struct qdl_device **qdl_out, char *programmer,
 
 static void firehose_session_close(struct qdl_device *qdl, bool do_reset)
 {
-	if (do_reset && !qfenix_no_reset)
+	if (do_reset && qfenix_reset)
 		firehose_power(qdl, "reset", 1);
 	qdl_close(qdl);
 	qdl_deinit(qdl);
@@ -5509,7 +5509,7 @@ static void print_flash_help(FILE *out)
 	fprintf(out, "\nOptions:\n");
 	fprintf(out, "      --log=FILE            Write debug-level log to FILE\n");
 	fprintf(out, "      --sahara-timeout=MS   Sahara command timeout in ms (default: 1000)\n");
-	fprintf(out, "      --no-reset            Don't reset the device after the operation\n");
+	fprintf(out, "      --reset               Reset the device after the operation (default: no reset)\n");
 	fprintf(out, "  -d, --debug               Print detailed debug info\n");
 	fprintf(out, "  -n, --dry-run             Dry run, no device reading or flashing\n");
 	fprintf(out, "  -e, --erase-all           Erase all partitions before programming\n");
@@ -6312,13 +6312,14 @@ int main(int argc, char **argv)
 	}
 
 	/*
-	 * Pre-scan for --no-reset (global flag): skip the device reset that
-	 * is otherwise issued at the end of an operation, so several
-	 * operations can be chained without the device rebooting each time.
+	 * Pre-scan for --reset (global flag): by default operations no longer
+	 * reset the device at the end, so several operations can be chained
+	 * without the device rebooting each time; pass --reset to force a
+	 * reset (e.g. to boot the device after flashing).
 	 */
 	for (int i = 1; i < argc; i++) {
-		if (!strcmp(argv[i], "--no-reset")) {
-			qfenix_no_reset = true;
+		if (!strcmp(argv[i], "--reset")) {
+			qfenix_reset = true;
 			for (int j = i; j + 1 < argc; j++)
 				argv[j] = argv[j + 1];
 			argc -= 1;
